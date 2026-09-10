@@ -24,7 +24,7 @@ const redisClient = redis.createClient({
 redisClient.on('error', (err) => console.error('Redis Client Error', err));
 redisClient.connect().then(() => console.log('Connected to Redis'));
 
-// Endpoint 1: Generate URL and start session
+// Generate URL and start session
 app.get('/auth/google/url', async (req, res) => {
   const sessionId = crypto.randomBytes(16).toString('hex');
 
@@ -34,14 +34,13 @@ app.get('/auth/google/url', async (req, res) => {
     scope: SCOPES,
     state: sessionId 
   });
-
-  // Store pending status in Redis with a 5-minute expiration (300 seconds)
+  
   await redisClient.set(sessionId, JSON.stringify({ status: 'pending' }), { EX: 300 });
 
   res.json({ url, sessionId });
 });
 
-// Endpoint 2: Callback from Google
+// Callback from Google
 app.get('/auth/google/callback', async (req, res) => {
   const { code, state: sessionId } = req.query;
 
@@ -56,11 +55,9 @@ app.get('/auth/google/callback', async (req, res) => {
     }
 
     const { tokens } = await oauth2Client.getToken(code);
-    
-    // Update Redis with the tokens and mark as completed
     await redisClient.set(sessionId, JSON.stringify({ status: 'completed', tokens }), { EX: 300 });
 
-    // Success response shown in the user's default browser
+    // Success response
     res.send(`
       <!DOCTYPE html>
       <html>
@@ -91,7 +88,7 @@ app.get('/auth/google/callback', async (req, res) => {
   }
 });
 
-// Endpoint 3: Polling endpoint for Electron
+// Polling endpoint for Electron
 app.get('/auth/google/status', async (req, res) => {
   const { sessionId } = req.query;
   
@@ -107,7 +104,6 @@ app.get('/auth/google/status', async (req, res) => {
     const session = JSON.parse(sessionStr);
 
     if (session.status === 'completed') {
-      // Clean up Redis immediately after successful retrieval
       await redisClient.del(sessionId); 
       return res.json({ status: 'completed', tokens: session.tokens });
     }
