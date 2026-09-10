@@ -4,6 +4,8 @@ const { google } = require('googleapis');
 const cors = require('cors');
 const crypto = require('crypto');
 const redis = require('redis');
+const rateLimit = require('express-rate-limit');
+const RedisStore = require('rate-limit-redis');
 
 const app = express();
 app.use(cors());
@@ -24,8 +26,35 @@ const redisClient = redis.createClient({
 redisClient.on('error', (err) => console.error('Redis Client Error', err));
 redisClient.connect().then(() => console.log('Connected to Redis'));
 
+// Adding Redis client with the rate limiter
+const store = new RedisStore({
+  sendCommand: (...args) => redisClient.sendCommand(args),
+});
+
+// All the rate limiter definition
+const generateUrlLimiter = rateLimit({
+  store: store,
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  message: { error: 'Too many login attempts. Please wait 15 minutes.' }
+});
+
+const pollingLimiter = rateLimit({
+  store: store,
+  windowMs: 5 * 60 * 1000,
+  max: 200, 
+  message: { error: 'Rate limit exceeded.' }
+});
+
+const refreshLimiter = rateLimit({
+  store: store,
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  message: { error: 'Too many refresh requests.' }
+});
+
 // Generate URL and start session
-app.get('/auth/google/url', async (req, res) => {
+app.get('/auth/google/url', generateUrlLimiter, async (req, res) => {
   const sessionId = crypto.randomBytes(16).toString('hex');
 
   const url = oauth2Client.generateAuthUrl({
@@ -89,7 +118,7 @@ app.get('/auth/google/callback', async (req, res) => {
 });
 
 // Polling endpoint for Electron
-app.get('/auth/google/status', async (req, res) => {
+app.get('/auth/google/status', pollingLimiter, async (req, res) => {
   const { sessionId } = req.query;
 
   const isValidHex = /^[0-9a-fA-F]{32}$/.test(sessionId);
@@ -116,6 +145,42 @@ app.get('/auth/google/status', async (req, res) => {
     res.json({ status: 'pending' });
   } catch (error) {
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.post('/auth/google/refresh', refreshLimiter, async (req, res) => {
+  const { refreshToken } = req.body;
+
+  if (!refreshToken) {
+    return res.status(400).json({ error: 'Missing refreshToken' });
+  }
+
+  try {
+    // Temporary client instance to refresh credentials
+    const client = new google.auth.OAuth2(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET
+    );
+
+    client.setCredentials({ refresh_token: refreshToken });
+
+    // New tokens from Google
+    const { credentials } = await client.refreshAccessToken();
+
+    res.json({
+      access_token: credentials.access_token,
+      refresh_token: credentials.refresh_token || refreshToken,
+      expiry_date: credentials.expiry_date
+    });
+  } catch (error) {
+    console.error('Refresh error:', error.response?.data || error.message);
+    
+    // Google returns 'invalid_grant' when the refresh token is expired or revoked
+    const isRevokedOrExpired = error.response?.data?.error === 'invalid_grant';
+    
+    res.status(isRevokedOrExpired ? 401 : 500).json({
+      error: isRevokedOrExpired ? 'REFRESH_TOKEN_EXPIRED' : 'Failed to refresh token'
+    });
   }
 });
 
