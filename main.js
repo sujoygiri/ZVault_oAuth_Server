@@ -34,7 +34,7 @@ app.get('/auth/google/url', async (req, res) => {
     scope: SCOPES,
     state: sessionId 
   });
-  
+
   await redisClient.set(sessionId, JSON.stringify({ status: 'pending' }), { EX: 300 });
 
   res.json({ url, sessionId });
@@ -91,6 +91,11 @@ app.get('/auth/google/callback', async (req, res) => {
 // Polling endpoint for Electron
 app.get('/auth/google/status', async (req, res) => {
   const { sessionId } = req.query;
+
+  const isValidHex = /^[0-9a-fA-F]{32}$/.test(sessionId);
+  if (!sessionId || !isValidHex) {
+    return res.status(400).json({ error: 'Invalid session format' });
+  }
   
   if (!sessionId) return res.status(400).json({ error: 'Missing sessionId' });
 
