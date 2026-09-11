@@ -130,7 +130,7 @@ app.get("/auth/google/callback", async (req, res) => {
 });
 
 // Polling endpoint for Electron
-app.get("/auth/google/exchange", pollingLimiter, async (req, res) => {
+app.post("/auth/google/exchange", pollingLimiter, async (req, res) => {
   const { sessionId, codeVerifier } = req.body;
 
   if (!sessionId || !codeVerifier) {
