@@ -53,8 +53,18 @@ const refreshLimiter = rateLimit({
   message: { error: "Too many refresh requests." },
 });
 
+// Deterrence Middleware
+app.use((req, res, next) => {
+  if (req.path === "/auth/google/callback") return next();
+  if (req.headers["x-zvault-app-token"] !== process.env.APP_TOKEN) {
+    return res.status(403).json({ error: "Unauthorized client" });
+  }
+  next();
+});
+
 // Generate URL and start session
 app.get("/auth/google/url", generateUrlLimiter, async (req, res) => {
+  const { code_challenge } = req.query;
   const sessionId = crypto.randomBytes(16).toString("hex");
 
   const url = oauth2Client.generateAuthUrl({
@@ -62,6 +72,8 @@ app.get("/auth/google/url", generateUrlLimiter, async (req, res) => {
     prompt: "consent",
     scope: SCOPES,
     state: sessionId,
+    code_challenge,
+    code_challenge_method: "S256",
   });
 
   await redisClient.set(sessionId, JSON.stringify({ status: "pending" }), {
@@ -80,15 +92,9 @@ app.get("/auth/google/callback", async (req, res) => {
   }
 
   try {
-    const sessionData = await redisClient.get(sessionId);
-    if (!sessionData) {
-      return res.status(400).send("Session expired or invalid.");
-    }
-
-    const { tokens } = await oauth2Client.getToken(code);
     await redisClient.set(
       sessionId,
-      JSON.stringify({ status: "completed", tokens }),
+      JSON.stringify({ status: "authorized", code }),
       { EX: 300 },
     );
 
@@ -123,15 +129,17 @@ app.get("/auth/google/callback", async (req, res) => {
 });
 
 // Polling endpoint for Electron
-app.get("/auth/google/status", pollingLimiter, async (req, res) => {
-  const { sessionId } = req.query;
+app.get("/auth/google/exchange", pollingLimiter, async (req, res) => {
+  const { sessionId, codeVerifier } = req.body;
 
-  const isValidHex = /^[0-9a-fA-F]{32}$/.test(sessionId);
-  if (!sessionId || !isValidHex) {
-    return res.status(400).json({ error: "Invalid session format" });
+  if (!sessionId || !codeVerifier) {
+    return res.status(400).json({ error: "Missing parameters" });
   }
 
-  if (!sessionId) return res.status(400).json({ error: "Missing sessionId" });
+  const isValidHex = /^[0-9a-fA-F]{32}$/.test(sessionId);
+  if (!isValidHex) {
+    return res.status(400).json({ error: "Invalid session format" });
+  }
 
   try {
     const sessionStr = await redisClient.get(sessionId);
@@ -142,14 +150,18 @@ app.get("/auth/google/status", pollingLimiter, async (req, res) => {
 
     const session = JSON.parse(sessionStr);
 
-    if (session.status === "completed") {
+    if (session.status === "authorized" && session.code) {
+      const { tokens } = await oauth2Client.getToken({
+        code: session.code,
+        codeVerifier,
+      });
       await redisClient.del(sessionId);
-      return res.json({ status: "completed", tokens: session.tokens });
+      return res.json({ status: 'completed', tokens });
     }
 
     res.json({ status: "pending" });
   } catch (error) {
-    res.status(500).json({ error: "Internal server error" });
+    res.status(500).json({ error: "Failed to exchange tokens" });
   }
 });
 
